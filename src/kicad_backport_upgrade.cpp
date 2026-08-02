@@ -534,6 +534,7 @@ void appendWarning( std::vector<std::string>& aWarnings, int aCount, const std::
 std::vector<std::string> ApplyUpgradeRules( DOCUMENT& aDocument, int aTarget )
 {
     std::vector<std::string> warnings;
+    int source = IsNumber( aDocument.Version ) ? std::stoi( aDocument.Version ) : 0;
 
     if( !aDocument.Root )
         return warnings;
@@ -591,6 +592,14 @@ std::vector<std::string> ApplyUpgradeRules( DOCUMENT& aDocument, int aTarget )
 
     case KIND::SCHEMATIC:
     {
+        RULE_REWRITERS::IMAGE_SCALE_MIGRATION_RESULT imageScales =
+                RULE_REWRITERS::migrateReferenceImageScales(
+                        aDocument.Root.get(), true, source, aTarget );
+        appendWarning( warnings, imageScales.Changed,
+                       "rescaled embedded PNG reference images for the corrected KiCad PPI calculation" );
+        appendWarning( warnings, imageScales.Unavailable,
+                       "could not rescale embedded reference images without a usable PNG pHYs chunk" );
+
         int n = renameChildHeadInParents( aDocument.Root.get(), schematicTstampParents,
                                           "tstamp", "uuid" );
         appendWarning( warnings, n, "renamed schematic tstamp fields to uuid" );
@@ -629,6 +638,14 @@ std::vector<std::string> ApplyUpgradeRules( DOCUMENT& aDocument, int aTarget )
     case KIND::BOARD:
     case KIND::FOOTPRINT:
     {
+        RULE_REWRITERS::IMAGE_SCALE_MIGRATION_RESULT imageScales =
+                RULE_REWRITERS::migrateReferenceImageScales(
+                        aDocument.Root.get(), false, source, aTarget );
+        appendWarning( warnings, imageScales.Changed,
+                       "rescaled embedded PNG reference images for the corrected KiCad PPI calculation" );
+        appendWarning( warnings, imageScales.Unavailable,
+                       "could not rescale embedded reference images without a usable PNG pHYs chunk" );
+
         int n = 0;
 
         n = removeChildrenFromParents( aDocument.Root.get(), { "kicad_pcb" }, { "host" } );

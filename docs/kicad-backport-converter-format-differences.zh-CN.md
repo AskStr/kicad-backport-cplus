@@ -98,7 +98,7 @@
 | `8.0` | `20231120` | `20231120` | `20240108` | `20240108` | `20231118` | `generator_version`、UUID/id、PCB 字段等兼容边界。 |
 | `9.0` | `20241209` | `20250114` | `20241229` | `20241229` | `20231118` | 嵌入数据、表格、规则区、复杂 PCB 对象等边界。 |
 | `10.0` | `20251024` | `20260306` | `20260206` | `20260206` | `20231118` | 当前代码支持的最高常规目标别名。 |
-| `10.99` | `20251024` | `20260306` | `20260603` | `20260603` | `20231118` | 开发目标别名；当前只把 PCB/封装推进到 `20260603`，符号库/原理图仍与 `10.0` 相同。 |
+| `10.99` | `20260629` | `20260722` | `20260728` | `20260728` | `20231118` | 最新开发格式锚点，并为新几何、图片缩放、映射、约束和 grid item 提供兼容降级。 |
 
 ## 版本差异与实现处理
 
@@ -111,7 +111,7 @@
 | KiCad 8 | `.kicad_pro` JSON | `20231120` | `20231120` | `20240108` | `20231118` | 包含 `generator_version`、PCB footprint fields、UUID/id 规范化等边界；降到 7/6 时回退。 |
 | KiCad 9 | `.kicad_pro` JSON | `20250114` | `20241209` | `20241229` | `20231118` | embedded files/fonts、tables、rule areas、component classes、padstack/via stack、font face 等边界；降级以删除和兼容重写为主。 |
 | KiCad 10 | `.kicad_pro` JSON | `20260306` | `20251024` | `20260206` | `20231118` | variants、jumper/power/position flags、body styles、group/locked、via protection、backdrill、barcodes、net chains、native ellipse 等边界；降到 9 或更早会丢失这些不可表达信息。 |
-| KiCad 10.99 | `.kicad_pro` JSON | `20260306` | `20251024` | `20260603` | `20231118` | 仅 PCB/封装增加到 `20260603`；新增 table-cell `knockout` 等规则只按实现表处理。 |
+| KiCad 10.99 | `.kicad_pro` JSON | `20260722` | `20260629` | `20260728` | `20231118` | 新增原生椭圆、pin map/override、variant symbol override、footprint 仿射变换、PNG PPI 修正、几何约束和自定义 grid item；降到旧目标时会近似或移除并报告警告。 |
 
 ## 转换分派流程
 

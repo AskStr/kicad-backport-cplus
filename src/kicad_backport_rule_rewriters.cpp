@@ -3502,6 +3502,560 @@ int downgradeBoardNetNamesToCodes( SEXPR::NODE* aRoot )
 }
 
 
+
+namespace
+{
+
+bool parseFiniteDouble( const std::string& aValue, double& aResult )
+{
+    char* end = nullptr;
+    aResult = std::strtod( aValue.c_str(), &end );
+    return end != aValue.c_str() && end && *end == '\0' && std::isfinite( aResult );
+}
+
+
+bool ellipsePolylinePoints( SEXPR::NODE* aNode,
+                            std::vector<std::pair<double, double>>& aPoints )
+{
+    const SEXPR::NODE* center = aNode ? aNode->ChildList( "center" ) : nullptr;
+    const SEXPR::NODE* major = aNode ? aNode->ChildList( "major_radius" ) : nullptr;
+    const SEXPR::NODE* minor = aNode ? aNode->ChildList( "minor_radius" ) : nullptr;
+    const SEXPR::NODE* rotation = aNode ? aNode->ChildList( "rotation_angle" ) : nullptr;
+
+    if( !center || !major || !minor )
+        return false;
+
+    double cx = 0.0;
+    double cy = 0.0;
+    double rx = 0.0;
+    double ry = 0.0;
+    double angle = 0.0;
+
+    if( !parseFiniteDouble( center->AtomAt( 1 ), cx )
+        || !parseFiniteDouble( center->AtomAt( 2 ), cy )
+        || !parseFiniteDouble( major->AtomAt( 1 ), rx )
+        || !parseFiniteDouble( minor->AtomAt( 1 ), ry )
+        || ( rotation && !parseFiniteDouble( rotation->AtomAt( 1 ), angle ) )
+        || rx <= 0.0 || ry <= 0.0 )
+    {
+        return false;
+    }
+
+    double startAngle = 0.0;
+    double sweep = 360.0;
+    int segments = 32;
+    const std::string head = aNode->HeadView();
+
+    if( head.size() >= 4 && head.substr( head.size() - 4 ) == "_arc" )
+    {
+        const SEXPR::NODE* start = aNode->ChildList( "start_angle" );
+        const SEXPR::NODE* end = aNode->ChildList( "end_angle" );
+        double endAngle = 0.0;
+
+        if( !start || !end || !parseFiniteDouble( start->AtomAt( 1 ), startAngle )
+            || !parseFiniteDouble( end->AtomAt( 1 ), endAngle ) )
+        {
+            return false;
+        }
+
+        sweep = std::fmod( endAngle - startAngle, 360.0 );
+
+        if( sweep <= 0.0 )
+            sweep += 360.0;
+
+        if( std::abs( sweep ) < 0.0000000005 )
+            sweep = 360.0;
+
+        segments = std::max( 4, static_cast<int>( std::ceil( sweep / 360.0 * 32.0 ) ) );
+    }
+
+    constexpr double PI = 3.14159265358979323846;
+    double rotationRadians = angle * PI / 180.0;
+    double rotationCos = std::cos( rotationRadians );
+    double rotationSin = std::sin( rotationRadians );
+    aPoints.clear();
+    aPoints.reserve( static_cast<size_t>( segments + 1 ) );
+
+    for( int index = 0; index <= segments; ++index )
+    {
+        double theta = ( startAngle + sweep * index / segments ) * PI / 180.0;
+        double x = rx * std::cos( theta );
+        double y = ry * std::sin( theta );
+        aPoints.emplace_back( cx + x * rotationCos - y * rotationSin,
+                              cy + x * rotationSin + y * rotationCos );
+    }
+
+    return true;
+}
+
+
+bool replaceEllipseWithPolyline( SEXPR::NODE* aNode, const std::string& aReplacementHead )
+{
+    std::vector<std::pair<double, double>> points;
+
+    if( !ellipsePolylinePoints( aNode, points ) )
+        return false;
+
+    static const std::set<std::string> geometryHeads = {
+        "center", "major_radius", "minor_radius", "rotation_angle", "start_angle", "end_angle"
+    };
+    std::vector<std::unique_ptr<SEXPR::NODE>> retained;
+
+    for( std::unique_ptr<SEXPR::NODE>& child : aNode->Children )
+    {
+        if( child && !child->IsAtom() && geometryHeads.count( child->HeadView() ) )
+            continue;
+
+        retained.push_back( std::move( child ) );
+    }
+
+    if( retained.empty() || !retained[0] || !retained[0]->IsAtom() )
+        return false;
+
+    retained[0]->Atom = aReplacementHead;
+    retained[0]->Quoted = false;
+    std::unique_ptr<SEXPR::NODE> pts = listNode( "pts" );
+
+    for( const auto& point : points )
+    {
+        std::unique_ptr<SEXPR::NODE> xy = listNode( "xy" );
+        xy->Children.push_back( SEXPR::NODE::MakeAtom( formatDouble( point.first ) ) );
+        xy->Children.push_back( SEXPR::NODE::MakeAtom( formatDouble( point.second ) ) );
+        pts->Children.push_back( std::move( xy ) );
+    }
+
+    retained.insert( retained.begin() + 1, std::move( pts ) );
+    aNode->Children = std::move( retained );
+    return true;
+}
+
+
+int visitNativeEllipses( SEXPR::NODE* aNode, bool aPcbGeometry )
+{
+    if( !aNode || aNode->IsAtom() )
+        return 0;
+
+    int converted = 0;
+
+    for( std::unique_ptr<SEXPR::NODE>& child : aNode->Children )
+    {
+        if( !child || child->IsAtom() )
+            continue;
+
+        const std::string head = child->HeadView();
+        std::string replacement;
+
+        if( aPcbGeometry )
+        {
+            if( head == "gr_ellipse" || head == "gr_ellipse_arc" )
+                replacement = "gr_poly";
+            else if( head == "fp_ellipse" || head == "fp_ellipse_arc" )
+                replacement = "fp_poly";
+        }
+        else if( head == "ellipse" || head == "ellipse_arc" )
+        {
+            replacement = "polyline";
+        }
+
+        if( !replacement.empty() && replaceEllipseWithPolyline( child.get(), replacement ) )
+            ++converted;
+
+        converted += visitNativeEllipses( child.get(), aPcbGeometry );
+    }
+
+    return converted;
+}
+
+
+int base64Digit( char aChar )
+{
+    if( aChar >= 'A' && aChar <= 'Z' )
+        return aChar - 'A';
+    if( aChar >= 'a' && aChar <= 'z' )
+        return aChar - 'a' + 26;
+    if( aChar >= '0' && aChar <= '9' )
+        return aChar - '0' + 52;
+    if( aChar == '+' )
+        return 62;
+    if( aChar == '/' )
+        return 63;
+    return -1;
+}
+
+
+bool decodeBase64ImageData( const std::string& aText, std::vector<unsigned char>& aOutput )
+{
+    aOutput.clear();
+    int value = 0;
+    int bits = -8;
+    bool padding = false;
+
+    for( char ch : aText )
+    {
+        if( std::isspace( static_cast<unsigned char>( ch ) ) || ch == '|' )
+            continue;
+
+        if( ch == '=' )
+        {
+            padding = true;
+            continue;
+        }
+
+        if( padding )
+            return false;
+
+        int digit = base64Digit( ch );
+
+        if( digit < 0 )
+            return false;
+
+        value = ( value << 6 ) | digit;
+        bits += 6;
+
+        if( bits >= 0 )
+        {
+            aOutput.push_back( static_cast<unsigned char>( ( value >> bits ) & 0xFF ) );
+            bits -= 8;
+        }
+    }
+
+    return !aOutput.empty();
+}
+
+
+unsigned int readBigEndian32( const unsigned char* aData )
+{
+    return ( static_cast<unsigned int>( aData[0] ) << 24 )
+           | ( static_cast<unsigned int>( aData[1] ) << 16 )
+           | ( static_cast<unsigned int>( aData[2] ) << 8 )
+           | static_cast<unsigned int>( aData[3] );
+}
+
+
+bool pngPpiFromImageData( SEXPR::NODE* aImage, int& aActualPpi, int& aLegacyPpi )
+{
+    const SEXPR::NODE* data = aImage ? aImage->ChildList( "data" ) : nullptr;
+
+    if( !data )
+        return false;
+
+    std::string encoded;
+
+    for( size_t i = 1; i < data->Children.size(); ++i )
+    {
+        const std::unique_ptr<SEXPR::NODE>& child = data->Children[i];
+
+        if( child && child->IsAtom() )
+            encoded += child->Atom;
+    }
+
+    std::vector<unsigned char> bytes;
+
+    if( !decodeBase64ImageData( encoded, bytes ) || bytes.size() < 8 )
+        return false;
+
+    static const unsigned char signature[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+
+    if( !std::equal( std::begin( signature ), std::end( signature ), bytes.begin() ) )
+        return false;
+
+    size_t position = 8;
+
+    while( position + 12 <= bytes.size() )
+    {
+        unsigned int length = readBigEndian32( bytes.data() + position );
+        size_t chunkEnd = position + 12 + static_cast<size_t>( length );
+
+        if( chunkEnd < position || chunkEnd > bytes.size() )
+            return false;
+
+        const unsigned char* type = bytes.data() + position + 4;
+        const unsigned char* chunk = bytes.data() + position + 8;
+
+        if( type[0] == 'p' && type[1] == 'H' && type[2] == 'Y' && type[3] == 's'
+            && length == 9 && chunk[8] == 1 )
+        {
+            double pixelsPerCm = readBigEndian32( chunk ) / 100.0;
+
+            if( pixelsPerCm <= 1.0 )
+                return false;
+
+            aActualPpi = static_cast<int>( std::floor( pixelsPerCm * 2.54 + 0.5 ) );
+            aLegacyPpi = static_cast<int>( std::floor( std::floor( pixelsPerCm ) * 2.54 + 0.5 ) );
+            return aActualPpi > 0 && aLegacyPpi > 0;
+        }
+
+        position = chunkEnd;
+    }
+
+    return false;
+}
+
+
+double imageScale( SEXPR::NODE* aImage )
+{
+    const SEXPR::NODE* scale = aImage ? aImage->ChildList( "scale" ) : nullptr;
+    double value = 1.0;
+
+    if( !scale || !parseFiniteDouble( scale->AtomAt( 1 ), value ) || value == 0.0 )
+        return 1.0;
+
+    return value;
+}
+
+
+int setImageScale( SEXPR::NODE* aImage, double aValue )
+{
+    SEXPR::NODE* scale = aImage ? aImage->ChildList( "scale" ) : nullptr;
+
+    if( std::abs( aValue - 1.0 ) < 0.0000000005 )
+    {
+        if( !scale )
+            return 0;
+
+        return removeDirectChildrenByHeads( aImage, { "scale" } );
+    }
+
+    if( scale )
+    {
+        if( scale->SetAtomAt( 1, formatDouble( aValue ), false ) )
+            return 1;
+
+        scale->Children.push_back( SEXPR::NODE::MakeAtom( formatDouble( aValue ) ) );
+        return 1;
+    }
+
+    std::unique_ptr<SEXPR::NODE> newScale = listNode( "scale" );
+    newScale->Children.push_back( SEXPR::NODE::MakeAtom( formatDouble( aValue ) ) );
+    aImage->Children.push_back( std::move( newScale ) );
+    return 1;
+}
+
+
+void migrateImageScalesRecursive( SEXPR::NODE* aNode, bool aSchematic, int aSource,
+                                  int aTarget, bool aDowngrade,
+                                  IMAGE_SCALE_MIGRATION_RESULT& aResult )
+{
+    if( !aNode || aNode->IsAtom() )
+        return;
+
+    for( std::unique_ptr<SEXPR::NODE>& child : aNode->Children )
+    {
+        if( !child || child->IsAtom() )
+            continue;
+
+        if( child->HeadView() == "image" )
+        {
+            int actualPpi = 0;
+            int legacyPpi = 0;
+
+            if( !pngPpiFromImageData( child.get(), actualPpi, legacyPpi ) )
+            {
+                ++aResult.Unavailable;
+            }
+            else
+            {
+                double current = imageScale( child.get() );
+                double converted = current;
+
+                if( aDowngrade )
+                {
+                    if( aSchematic && aTarget <= 20230121 )
+                        converted = current * 300.0 / actualPpi;
+                    else
+                        converted = current * legacyPpi / actualPpi;
+                }
+                else if( aSchematic && aSource <= 20230121 )
+                {
+                    converted = current * actualPpi / 300.0;
+                }
+                else
+                {
+                    converted = current * actualPpi / legacyPpi;
+                }
+
+                aResult.Changed += setImageScale( child.get(), converted );
+            }
+        }
+
+        migrateImageScalesRecursive( child.get(), aSchematic, aSource, aTarget,
+                                     aDowngrade, aResult );
+    }
+}
+
+
+bool transformValues( SEXPR::NODE* aTransform, double& aX, double& aY,
+                      double& aAngle, double& aScaleX, double& aScaleY )
+{
+    const SEXPR::NODE* translate = aTransform ? aTransform->ChildList( "translate" ) : nullptr;
+    const SEXPR::NODE* rotate = aTransform ? aTransform->ChildList( "rotate" ) : nullptr;
+    const SEXPR::NODE* scale = aTransform ? aTransform->ChildList( "scale" ) : nullptr;
+    aX = 0.0;
+    aY = 0.0;
+    aAngle = 0.0;
+    aScaleX = 1.0;
+    aScaleY = 1.0;
+
+    if( ( translate && ( !parseFiniteDouble( translate->AtomAt( 1 ), aX )
+                         || !parseFiniteDouble( translate->AtomAt( 2 ), aY ) ) )
+        || ( rotate && !parseFiniteDouble( rotate->AtomAt( 1 ), aAngle ) )
+        || ( scale && ( !parseFiniteDouble( scale->AtomAt( 1 ), aScaleX )
+                       || !parseFiniteDouble( scale->AtomAt( 2 ), aScaleY ) ) )
+        || aScaleX == 0.0 || aScaleY == 0.0 )
+    {
+        return false;
+    }
+
+    return true;
+}
+
+
+int scaleAtoms( SEXPR::NODE* aNode,
+                const std::vector<std::pair<size_t, double>>& aFactors )
+{
+    int changed = 0;
+
+    for( const auto& factor : aFactors )
+    {
+        double value = 0.0;
+
+        if( !parseFiniteDouble( aNode->AtomAt( factor.first ), value ) )
+            continue;
+
+        if( aNode->SetAtomAt( factor.first, formatDouble( value * factor.second ), false ) )
+            ++changed;
+    }
+
+    return changed;
+}
+
+
+int bakeFootprintGeometry( SEXPR::NODE* aNode, double aScaleX, double aScaleY )
+{
+    if( !aNode || aNode->IsAtom() )
+        return 0;
+
+    static const std::set<std::string> xyHeads = {
+        "at", "start", "end", "mid", "center", "position", "xy"
+    };
+    static const std::set<std::string> sizeHeads = { "size", "drill" };
+    static const std::set<std::string> scalarHeads = {
+        "width", "thickness", "radius", "major_radius", "minor_radius", "clearance",
+        "thermal_gap", "thermal_bridge_width", "solder_mask_margin", "solder_paste_margin",
+        "die_length", "extension_height", "arrow_length"
+    };
+    double averageScale = ( std::abs( aScaleX ) + std::abs( aScaleY ) ) * 0.5;
+    int changed = 0;
+
+    for( std::unique_ptr<SEXPR::NODE>& child : aNode->Children )
+    {
+        if( !child || child->IsAtom() )
+            continue;
+
+        const std::string head = child->HeadView();
+
+        if( xyHeads.count( head ) || sizeHeads.count( head ) )
+            changed += scaleAtoms( child.get(), { { 1, aScaleX }, { 2, aScaleY } } );
+        else if( head == "xyz" )
+            changed += scaleAtoms( child.get(), { { 1, aScaleX }, { 2, aScaleY }, { 3, averageScale } } );
+        else if( scalarHeads.count( head ) )
+            changed += scaleAtoms( child.get(), { { 1, averageScale } } );
+
+        changed += bakeFootprintGeometry( child.get(), aScaleX, aScaleY );
+    }
+
+    return changed;
+}
+
+
+void bakeFootprintTransformsRecursive( SEXPR::NODE* aNode,
+                                       FOOTPRINT_TRANSFORM_RESULT& aResult )
+{
+    if( !aNode || aNode->IsAtom() )
+        return;
+
+    const std::string head = aNode->HeadView();
+
+    if( head == "footprint" || head == "module" )
+    {
+        SEXPR::NODE* transform = aNode->ChildList( "transform" );
+        double x = 0.0;
+        double y = 0.0;
+        double angle = 0.0;
+        double scaleX = 1.0;
+        double scaleY = 1.0;
+
+        if( transform && transformValues( transform, x, y, angle, scaleX, scaleY ) )
+        {
+            removeDirectChildrenByHeads( aNode, { "at", "transform" } );
+            bakeFootprintGeometry( aNode, scaleX, scaleY );
+            std::unique_ptr<SEXPR::NODE> at = listNode( "at" );
+            at->Children.push_back( SEXPR::NODE::MakeAtom( formatDouble( x ) ) );
+            at->Children.push_back( SEXPR::NODE::MakeAtom( formatDouble( y ) ) );
+
+            if( std::abs( angle ) >= 0.0000000005 )
+                at->Children.push_back( SEXPR::NODE::MakeAtom( formatDouble( angle ) ) );
+
+            size_t insertAt = 1;
+
+            while( insertAt < aNode->Children.size() && aNode->Children[insertAt]
+                   && aNode->Children[insertAt]->IsAtom() )
+            {
+                ++insertAt;
+            }
+
+            aNode->Children.insert( aNode->Children.begin() + insertAt, std::move( at ) );
+            ++aResult.Baked;
+
+            if( std::abs( std::abs( scaleX ) - std::abs( scaleY ) ) > 0.0000000005 )
+                ++aResult.NonUniform;
+        }
+    }
+
+    for( std::unique_ptr<SEXPR::NODE>& child : aNode->Children )
+    {
+        if( child && !child->IsAtom() )
+            bakeFootprintTransformsRecursive( child.get(), aResult );
+    }
+}
+
+} // namespace
+
+
+int downgradeNativeEllipses( SEXPR::NODE* aRoot, bool aPcbGeometry )
+{
+    return visitNativeEllipses( aRoot, aPcbGeometry );
+}
+
+
+IMAGE_SCALE_MIGRATION_RESULT migrateReferenceImageScales( SEXPR::NODE* aRoot,
+                                                           bool aSchematic,
+                                                           int aSource, int aTarget )
+{
+    IMAGE_SCALE_MIGRATION_RESULT result;
+
+    if( !aRoot || aRoot->IsAtom() || aSource <= 0 || aSource == aTarget )
+        return result;
+
+    bool downgrade = aSource >= 20260623 && aTarget < 20260623;
+    bool upgrade = aSource < 20260623 && aTarget >= 20260623;
+
+    if( !downgrade && !upgrade )
+        return result;
+
+    migrateImageScalesRecursive( aRoot, aSchematic, aSource, aTarget, downgrade, result );
+    return result;
+}
+
+
+FOOTPRINT_TRANSFORM_RESULT bakeFootprintTransforms( SEXPR::NODE* aRoot )
+{
+    FOOTPRINT_TRANSFORM_RESULT result;
+    bakeFootprintTransformsRecursive( aRoot, result );
+    return result;
+}
+
+
 std::vector<std::string> removeIntroduced( SEXPR::NODE* aRoot, int aTarget,
                                            const std::vector<FEATURE_RULE>& aRules )
 {

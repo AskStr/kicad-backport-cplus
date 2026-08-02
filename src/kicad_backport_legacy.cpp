@@ -731,6 +731,62 @@ std::unique_ptr<SEXPR::NODE> atomList( const std::string& aHead, const std::stri
 }
 
 
+std::string schematicProjectName( const FS::path& aSchematic )
+{
+    std::error_code error;
+
+    for( FS::directory_iterator it( aSchematic.parent_path(), error ), end; it != end; ++it )
+    {
+        if( it->is_regular_file() )
+        {
+            std::string ext = Lower( it->path().extension().string() );
+
+            if( ext == ".kicad_pro" || ext == ".pro" )
+                return it->path().stem().string();
+        }
+    }
+
+    return aSchematic.stem().string();
+}
+
+
+std::unique_ptr<SEXPR::NODE> schematicInstancesNode(
+        const std::string& aProjectName, std::vector<std::unique_ptr<SEXPR::NODE>> aPaths )
+{
+    std::unique_ptr<SEXPR::NODE> instances = listNode( "instances" );
+    std::unique_ptr<SEXPR::NODE> project = listNode( "project" );
+    appendAtom( project.get(), aProjectName, true );
+
+    for( std::unique_ptr<SEXPR::NODE>& path : aPaths )
+        appendChild( project.get(), std::move( path ) );
+
+    appendChild( instances.get(), std::move( project ) );
+    return instances;
+}
+
+
+int quoteAtomsInHeadedLists( SEXPR::NODE* aRoot, const std::string& aHead, size_t aAtomIndex )
+{
+    if( !aRoot || aRoot->IsAtom() )
+        return 0;
+
+    int changed = 0;
+
+    if( aRoot->HeadView() == aHead && aAtomIndex < aRoot->Children.size()
+        && aRoot->Children[aAtomIndex] && aRoot->Children[aAtomIndex]->IsAtom()
+        && !aRoot->Children[aAtomIndex]->Quoted )
+    {
+        aRoot->Children[aAtomIndex]->Quoted = true;
+        ++changed;
+    }
+
+    for( std::unique_ptr<SEXPR::NODE>& child : aRoot->Children )
+        changed += quoteAtomsInHeadedLists( child.get(), aHead, aAtomIndex );
+
+    return changed;
+}
+
+
 std::unique_ptr<SEXPR::NODE> atNode( const std::string& aX, const std::string& aY,
                                      const std::string& aAngle = "0" )
 {
@@ -1803,6 +1859,9 @@ std::string legacySchematicToSexpr( const DOCUMENT& aDocument,
     LEGACY_SCHEMATIC_META meta = parseLegacySchematicMeta( aDocument.RawText );
     std::vector<std::string> lines = linesOf( aDocument.RawText );
     bool usePropertyIds = !IsNumber( aTargetVersion ) || std::stoi( aTargetVersion ) < 20230121;
+    bool useSymbolLocalInstances = IsNumber( aTargetVersion )
+                                   && std::stoi( aTargetVersion ) >= 20231120;
+    std::string projectName = schematicProjectName( aDocument.Path );
     std::map<std::string, LEGACY_SYMBOL_DEF> cacheDefs = schematicCacheSymbolDefs( aDocument, lines );
     std::map<std::string, std::string> cacheLibraries = schematicCacheSymbolLibraries( aDocument,
                                                                                        lines );
@@ -1905,8 +1964,13 @@ std::string legacySchematicToSexpr( const DOCUMENT& aDocument,
                     {
                         std::unique_ptr<SEXPR::NODE> pin = listNode( "pin" );
                         appendAtom( pin.get(), pinName, true );
-                        appendChild( pin.get(), atomList( "type",
-                                                          legacySheetPinTypeToSexpr( pinWords[0] ) ) );
+                        std::string pinType = legacySheetPinTypeToSexpr( pinWords[0] );
+
+                        if( useSymbolLocalInstances )
+                            appendAtom( pin.get(), pinType );
+                        else
+                            appendChild( pin.get(), atomList( "type", pinType ) );
+
                         appendChild( pin.get(), atNode( legacyCoordToMm( pinWords[2] ),
                                                         legacyCoordToMm( pinWords[3] ),
                                                         legacyTextOrientationToAngle( pinWords[1] ) ) );
@@ -1930,22 +1994,33 @@ std::string legacySchematicToSexpr( const DOCUMENT& aDocument,
             appendAtom( size.get(), h );
             appendChild( sheet.get(), std::move( size ) );
             appendChild( sheet.get(), atomList( "uuid", uuid ) );
-            appendChild( sheet.get(), schematicPropertyNode( "Sheet name", sheetName, x, y, "0",
-                                                             false, "0", usePropertyIds,
-                                                             sheetNameSize ) );
-            appendChild( sheet.get(), schematicPropertyNode( "Sheet file", sheetFile, x, y, "1",
-                                                             false, "0", usePropertyIds,
-                                                             sheetFileSize ) );
+            appendChild( sheet.get(), schematicPropertyNode(
+                    useSymbolLocalInstances ? "Sheetname" : "Sheet name", sheetName, x, y, "0",
+                    false, "0", usePropertyIds, sheetNameSize ) );
+            appendChild( sheet.get(), schematicPropertyNode(
+                    useSymbolLocalInstances ? "Sheetfile" : "Sheet file", sheetFile, x, y, "1",
+                    false, "0", usePropertyIds, sheetFileSize ) );
 
             for( std::unique_ptr<SEXPR::NODE>& pin : sheetPins )
                 appendChild( sheet.get(), std::move( pin ) );
 
-            appendChild( root.get(), std::move( sheet ) );
-
             std::unique_ptr<SEXPR::NODE> path = listNode( "path" );
             appendAtom( path.get(), "/" + uuid, true );
             appendChild( path.get(), atomList( "page", std::to_string( nextSheetPage++ ), true ) );
-            appendChild( sheetInstances.get(), std::move( path ) );
+
+            if( useSymbolLocalInstances )
+            {
+                std::vector<std::unique_ptr<SEXPR::NODE>> localInstancePaths;
+                localInstancePaths.push_back( std::move( path ) );
+                appendChild( sheet.get(), schematicInstancesNode( projectName,
+                                                                  std::move( localInstancePaths ) ) );
+            }
+            else
+            {
+                appendChild( sheetInstances.get(), std::move( path ) );
+            }
+
+            appendChild( root.get(), std::move( sheet ) );
             ++convertedSheets;
         }
         else if( line == "$Comp" )
@@ -2177,15 +2252,27 @@ std::string legacySchematicToSexpr( const DOCUMENT& aDocument,
 
             appendSchematicSymbolPins( symbol.get(), symbolDef,
                                        aDocument.Path.string() + ":comp:" + block.str() );
-            appendChild( root.get(), std::move( symbol ) );
 
-            std::unique_ptr<SEXPR::NODE> instance = listNode( "path" );
-            appendAtom( instance.get(), "/" + uuid, true );
-            appendChild( instance.get(), atomList( "reference", reference, true ) );
-            appendChild( instance.get(), atomList( "unit", unit ) );
-            appendChild( instance.get(), atomList( "value", value, true ) );
-            appendChild( instance.get(), atomList( "footprint", footprint, true ) );
-            appendChild( symbolInstances.get(), std::move( instance ) );
+            auto makeInstancePath = [&]( const std::string& aPath,
+                                         const std::string& aReference,
+                                         const std::string& aUnit )
+            {
+                std::unique_ptr<SEXPR::NODE> instance = listNode( "path" );
+                appendAtom( instance.get(), aPath, true );
+                appendChild( instance.get(), atomList( "reference", aReference, true ) );
+                appendChild( instance.get(), atomList( "unit", aUnit ) );
+                appendChild( instance.get(), atomList( "value", value, true ) );
+                appendChild( instance.get(), atomList( "footprint", footprint, true ) );
+                return instance;
+            };
+
+            std::vector<std::unique_ptr<SEXPR::NODE>> localInstancePaths;
+            std::unique_ptr<SEXPR::NODE> instance = makeInstancePath( "/" + uuid, reference, unit );
+
+            if( useSymbolLocalInstances )
+                localInstancePaths.push_back( makeInstancePath( "/" + uuid, reference, unit ) );
+            else
+                appendChild( symbolInstances.get(), std::move( instance ) );
 
             for( const AR_INSTANCE& ar : arInstances )
             {
@@ -2194,18 +2281,20 @@ std::string legacySchematicToSexpr( const DOCUMENT& aDocument,
                 if( arPath.empty() )
                     continue;
 
-                std::unique_ptr<SEXPR::NODE> arNode = listNode( "path" );
-                appendAtom( arNode.get(), arPath, true );
-                appendChild( arNode.get(), atomList( "reference",
-                                                     ar.Reference.empty() ? reference : ar.Reference,
-                                                     true ) );
-                appendChild( arNode.get(), atomList( "unit",
-                                                     ar.Part.empty() ? unit : ar.Part ) );
-                appendChild( arNode.get(), atomList( "value", value, true ) );
-                appendChild( arNode.get(), atomList( "footprint", footprint, true ) );
-                appendChild( symbolInstances.get(), std::move( arNode ) );
+                std::string arReference = ar.Reference.empty() ? reference : ar.Reference;
+                std::string arUnit = ar.Part.empty() ? unit : ar.Part;
+
+                if( useSymbolLocalInstances )
+                    localInstancePaths.push_back( makeInstancePath( arPath, arReference, arUnit ) );
+                else
+                    appendChild( symbolInstances.get(), makeInstancePath( arPath, arReference, arUnit ) );
             }
 
+            if( useSymbolLocalInstances )
+                appendChild( symbol.get(), schematicInstancesNode( projectName,
+                                                                   std::move( localInstancePaths ) ) );
+
+            appendChild( root.get(), std::move( symbol ) );
             ++convertedSymbols;
         }
         else if( ( line == "Wire Wire Line" || line == "Wire Bus Line" )
@@ -2298,7 +2387,12 @@ std::string legacySchematicToSexpr( const DOCUMENT& aDocument,
     }
 
     appendChild( root.get(), std::move( sheetInstances ) );
-    appendChild( root.get(), std::move( symbolInstances ) );
+
+    if( !useSymbolLocalInstances )
+        appendChild( root.get(), std::move( symbolInstances ) );
+
+    if( useSymbolLocalInstances )
+        quoteAtomsInHeadedLists( root.get(), "uuid", 1 );
 
     if( aWarnings )
     {
@@ -2730,7 +2824,8 @@ std::string legacyLibraryToSexpr( const DOCUMENT& aDocument, const std::string& 
         if( words.size() < 2 )
             continue;
 
-        std::string name = sanitizeSymbolName( words[1] );
+        std::string legacyName = sanitizeSymbolName( words[1] );
+        std::string name = symbolNameWithoutLibraryPrefix( legacyName );
         std::string value = name;
         std::string reference = words.size() > 2
                 ? legacyLibraryReferencePrefix( words[2], name )
@@ -2840,7 +2935,8 @@ std::string legacyLibraryToSexpr( const DOCUMENT& aDocument, const std::string& 
             else if( itemWords[0] == "ALIAS" )
             {
                 for( size_t aliasIndex = 1; aliasIndex < itemWords.size(); ++aliasIndex )
-                    aliases.push_back( sanitizeSymbolName( itemWords[aliasIndex] ) );
+                    appendUnique( aliases, symbolNameWithoutLibraryPrefix(
+                                              sanitizeSymbolName( itemWords[aliasIndex] ) ) );
             }
             else if( itemWords[0] == "S" && itemWords.size() >= 9 )
             {
@@ -2885,6 +2981,10 @@ std::string legacyLibraryToSexpr( const DOCUMENT& aDocument, const std::string& 
                 footprintField.X, footprintField.Y, "2", footprintField.Hidden,
                 footprintField.Angle, usePropertyIds ) );
         LEGACY_DOC_META meta = docMeta[name];
+
+        if( meta.Description.empty() && meta.Keywords.empty() && meta.Datasheet.empty() )
+            meta = docMeta[legacyName];
+
         std::string mergedDatasheet = meta.Datasheet.empty() ? datasheet : meta.Datasheet;
         datasheetField.Value = mergedDatasheet;
         appendChild( symbol.get(), schematicPropertyNode( "Datasheet", datasheetField.Value,
@@ -3937,8 +4037,9 @@ void writeLegacyDrawItems( std::ostringstream& aOut, SEXPR::NODE* aSymbol, int& 
 }
 
 
-std::string sexprSymbolLibraryToLegacy( const DOCUMENT& aDocument, int aTargetMajor,
-                                        std::vector<std::string>* aWarnings )
+std::string sexprSymbolsToLegacyLibrary( const std::vector<SEXPR::NODE*>& aSymbols,
+                                         int aTargetMajor,
+                                         std::vector<std::string>* aWarnings )
 {
     std::ostringstream out;
     out << "EESchema-LIBRARY Version " << ( aTargetMajor <= 4 ? "2.3" : "2.4" ) << "\n";
@@ -3950,7 +4051,7 @@ std::string sexprSymbolLibraryToLegacy( const DOCUMENT& aDocument, int aTargetMa
     int aliasCount = 0;
     std::map<std::string, std::vector<std::string>> aliasesByBase;
 
-    for( SEXPR::NODE* symbol : topLevelSymbols( aDocument.Root.get() ) )
+    for( SEXPR::NODE* symbol : aSymbols )
     {
         std::string base = childAtomOrEmpty( symbol, "extends" );
 
@@ -3958,7 +4059,19 @@ std::string sexprSymbolLibraryToLegacy( const DOCUMENT& aDocument, int aTargetMa
             aliasesByBase[base].push_back( sanitizeSymbolName( symbol->AtomAt( 1 ) ) );
     }
 
-    for( SEXPR::NODE* symbol : topLevelSymbols( aDocument.Root.get() ) )
+    for( SEXPR::NODE* symbol : aSymbols )
+    {
+        if( !childAtomOrEmpty( symbol, "extends" ).empty() )
+            continue;
+
+        std::string name = sanitizeSymbolName( symbol->AtomAt( 1 ) );
+        std::string shortName = symbolNameWithoutLibraryPrefix( name );
+
+        if( shortName != name )
+            appendUnique( aliasesByBase[name], shortName );
+    }
+
+    for( SEXPR::NODE* symbol : aSymbols )
     {
         if( !childAtomOrEmpty( symbol, "extends" ).empty() )
             continue;
@@ -4027,6 +4140,14 @@ std::string sexprSymbolLibraryToLegacy( const DOCUMENT& aDocument, int aTargetMa
     }
 
     return out.str();
+}
+
+
+std::string sexprSymbolLibraryToLegacy( const DOCUMENT& aDocument, int aTargetMajor,
+                                        std::vector<std::string>* aWarnings )
+{
+    return sexprSymbolsToLegacyLibrary( topLevelSymbols( aDocument.Root.get() ),
+                                        aTargetMajor, aWarnings );
 }
 
 
@@ -4104,6 +4225,20 @@ std::string sexprProjectToLegacy( const DOCUMENT& aDocument, std::vector<std::st
 }
 
 } // namespace
+
+
+std::string EmbeddedSchematicSymbolsToLegacyLibraryText( const DOCUMENT& aDocument,
+                                                         int aTargetMajor,
+                                                         std::vector<std::string>* aWarnings )
+{
+    SEXPR::NODE* libSymbols = aDocument.Root ? aDocument.Root->ChildList( "lib_symbols" )
+                                             : nullptr;
+
+    if( !libSymbols )
+        return std::string();
+
+    return sexprSymbolsToLegacyLibrary( topLevelSymbols( libSymbols ), aTargetMajor, aWarnings );
+}
 
 
 bool IsLegacyKind( KIND aKind )

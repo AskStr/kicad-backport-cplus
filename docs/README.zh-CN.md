@@ -35,7 +35,7 @@ kicad-backport version
 
 | 目标 | 当前行为 |
 | --- | --- |
-| KiCad 10.99 | 开发别名。board 和 footprint 写 `20260603`；schematic 和 symbol-library 仍使用 KiCad 10 锚点。 |
+| KiCad 10.99 | 最新开发格式：symbol library 写 `20260629`，schematic 写 `20260722`，board/footprint 写 `20260728`。 |
 | KiCad 10 | 删除或重写不属于 `10.0` 目标锚点的更新开发语法。 |
 | KiCad 9 | 删除或降级 KiCad 10 时代特性，例如 variants、barcodes、backdrill/post-machining、jumper pad 元数据和仅 net-name 的 board 引用。 |
 | KiCad 8 | 删除或重写 KiCad 9+ tables、embedded files/fonts、component classes、padstacks、via stacks、rule/placement areas、任意 user-layer type qualifiers 和 font face 字段。 |
@@ -43,6 +43,8 @@ kicad-backport version
 | KiCad 6 | 面向第一代现代 schematic/symbol/project 文件族，并在需要时补 KiCad 6 parser 兼容结构。 |
 | KiCad 5.0/5.1 | board/footprint 使用 `20171130`；schematic、symbol-library、project 写 legacy `.sch`、`.lib/.dcm`、`.pro`。 |
 | KiCad 4 | board/footprint 使用 `4`，重写 V4 legacy schematic/library 文件头，并尽量简化 KiCad 5+ PCB 结构。 |
+
+降级 10.99 新格式时，会把原生椭圆近似为折线/多边形、烘焙 footprint 仿射变换、跨修正 PPI 边界保持嵌入 PNG 的显示尺寸，并对 pin map、variant override、net chain、几何约束和自定义 grid item 的移除给出警告。
 
 每类文件的版本锚点和转换细节见 [KiCad backport 转换器格式差异](kicad-backport-converter-format-differences.zh-CN.md)。
 

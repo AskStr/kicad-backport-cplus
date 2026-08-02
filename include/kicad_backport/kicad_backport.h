@@ -70,7 +70,7 @@ struct PROJECT_COPY_ENTRY
 class CONVERTER
 {
 public:
-    static constexpr const char* VERSION = "0.4.3";
+    static constexpr const char* VERSION = "0.4.5";
 
     int Run( int aArgc, char** aArgv );
 

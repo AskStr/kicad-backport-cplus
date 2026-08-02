@@ -1,5 +1,6 @@
 #include "kicad_backport/kicad_backport_rules.h"
 #include "internal/kicad_backport_rule_rewriters.h"
+#include "kicad_backport/kicad_backport_util.h"
 
 namespace KICAD_BACKPORT
 {
@@ -19,6 +20,7 @@ const std::vector<FEATURE_RULE>& symbolRules()
         { 20250324, { "pin_group", "pin_groups" }, "jumper pin groups are not available" },
         { 20250829, { "rounded_rectangle", "roundrect" }, "rounded rectangles are not available" },
         { 20260508, { "ellipse", "ellipse_arc" }, "native ellipse primitives are not available" },
+        { 20260629, { "associated_footprints", "pin_maps", "pin_map" }, "symbol pin-to-pad maps are not available" },
     };
 
     return rules;
@@ -38,6 +40,8 @@ const std::vector<FEATURE_RULE>& schematicRules()
         { 20250922, { "variants", "variant" }, "schematic variants are not available" },
         { 20260508, { "ellipse", "ellipse_arc" }, "native ellipse primitives are not available" },
         { 20260512, { "net_chain", "net_chains" }, "schematic net chains are not available" },
+        { 20260629, { "pin_map_override" }, "schematic pin-to-pad map overrides are not available" },
+        { 20260722, { "symbol_override" }, "variant symbol overrides are not available" },
     };
 
     return rules;
@@ -71,6 +75,9 @@ const std::vector<FEATURE_RULE>& boardRules()
         { 20260511, { "spec_frequency", "dielectric_model" }, "dielectric frequency-dependent stackup fields are not available" },
         { 20260512, { "net_chains", "net_chain" }, "PCB net chains are not available" },
         { 20260513, { "thieving" }, "copper thieving zone fill mode is not available" },
+        { 20260616, { "transform" }, "footprint affine transforms are not available" },
+        { 20260624, { "constraint" }, "geometric constraints are not available" },
+        { 20260728, { "grid_item" }, "custom grid items are not available" },
     };
 
     return rules;
@@ -361,6 +368,7 @@ int downgradePcbTstampsToLegacy5( SEXPR::NODE* aRoot )
 std::vector<std::string> ApplyDowngradeRules( DOCUMENT& aDocument, int aTarget )
 {
     std::vector<std::string> warnings;
+    int source = IsNumber( aDocument.Version ) ? std::stoi( aDocument.Version ) : 0;
 
     // Each branch is ordered from broad parser compatibility to narrow fixes.
     auto append = [&]( std::vector<std::string> aMore )
@@ -384,6 +392,11 @@ std::vector<std::string> ApplyDowngradeRules( DOCUMENT& aDocument, int aTarget )
     switch( aDocument.Kind )
     {
     case KIND::SYMBOL_LIBRARY:
+        // Preserve ellipse geometry before the feature gate removes the native nodes.
+        applyWhen( aTarget < 20260508,
+                   [&]() { return downgradeNativeEllipses( aDocument.Root.get(), false ); },
+                   "approximated symbol library ellipses with polyline segments" );
+
         // Symbol libraries share much of the schematic symbol syntax.
         append( removeIntroduced( aDocument.Root.get(), aTarget, symbolRules() ) );
 
@@ -483,14 +496,23 @@ std::vector<std::string> ApplyDowngradeRules( DOCUMENT& aDocument, int aTarget )
         break;
 
     case KIND::SCHEMATIC:
+    {
+        applyWhen( aTarget < 20260508,
+                   [&]() { return downgradeNativeEllipses( aDocument.Root.get(), false ); },
+                   "approximated schematic ellipses with polyline segments" );
+
+        IMAGE_SCALE_MIGRATION_RESULT imageScales = migrateReferenceImageScales(
+                aDocument.Root.get(), true, source, aTarget );
+        warnIfChanged( imageScales.Changed,
+                       "rescaled embedded PNG reference images for the older KiCad PPI calculation" );
+        warnIfChanged( imageScales.Unavailable,
+                       "could not rescale embedded reference images without a usable PNG pHYs chunk" );
+
         // Schematic downgrades preserve visible fields whenever old syntax can express them.
         append( removeIntroduced( aDocument.Root.get(), aTarget, schematicRules() ) );
 
         applyWhen( aTarget < 20231120, [&]() { return removeDirectChildrenByHead( aDocument.Root.get(), "generator_version" ); },
                    "removed schematic generator_version fields" );
-
-        applyWhen( aTarget < 20260306, [&]() { return removeDirectChildrenByHead( aDocument.Root.get(), "uuid" ); },
-                   "removed schematic root UUID fields" );
 
         applyWhen( aTarget < 20260326, [&]() { return removeDescendantsByHead( aDocument.Root.get(), { "locked" } ); },
                    "removed schematic locked fields introduced after target version" );
@@ -690,10 +712,31 @@ std::vector<std::string> ApplyDowngradeRules( DOCUMENT& aDocument, int aTarget )
         applyWhen( aTarget < 20260306, [&]() { return removeDirectChildrenByHead( aDocument.Root.get(), "group" ); },
                    "removed schematic group nodes" );
         break;
+    }
 
     case KIND::BOARD:
     case KIND::FOOTPRINT:
     {
+        applyWhen( aTarget < 20260508,
+                   [&]() { return downgradeNativeEllipses( aDocument.Root.get(), true ); },
+                   "approximated PCB ellipses with polygon segments" );
+
+        if( aTarget < 20260616 )
+        {
+            FOOTPRINT_TRANSFORM_RESULT transforms = bakeFootprintTransforms( aDocument.Root.get() );
+            warnIfChanged( transforms.Baked,
+                           "baked footprint affine transforms into legacy at/geometry fields" );
+            warnIfChanged( transforms.NonUniform,
+                           "non-uniform footprint scaling approximates circular primitives for older KiCad" );
+        }
+
+        IMAGE_SCALE_MIGRATION_RESULT imageScales = migrateReferenceImageScales(
+                aDocument.Root.get(), false, source, aTarget );
+        warnIfChanged( imageScales.Changed,
+                       "rescaled embedded PNG reference images for the older KiCad PPI calculation" );
+        warnIfChanged( imageScales.Unavailable,
+                       "could not rescale embedded reference images without a usable PNG pHYs chunk" );
+
         // PCB and footprint syntax use the same graphical and pad-level rewrites.
         if( aTarget < 20260603 )
         {

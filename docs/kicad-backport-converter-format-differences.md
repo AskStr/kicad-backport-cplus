@@ -97,7 +97,7 @@ This document describes the KiCad file-format differences that are actually hand
 | `8.0` | `20231120` | `20231120` | `20240108` | `20240108` | `20231118` | `generator_version`, UUID/id, and PCB field compatibility boundary. |
 | `9.0` | `20241209` | `20250114` | `20241229` | `20241229` | `20231118` | Embedded data, tables, rule areas, and complex PCB-object boundaries. |
 | `10.0` | `20251024` | `20260306` | `20260206` | `20260206` | `20231118` | Highest regular target alias currently supported by the code. |
-| `10.99` | `20251024` | `20260306` | `20260603` | `20260603` | `20231118` | Development alias; only board/footprint advance beyond `10.0`. |
+| `10.99` | `20260629` | `20260722` | `20260728` | `20260728` | `20231118` | Latest development anchors with compatibility rewrites for new geometry, image scaling, mappings, constraints, and grid items. |
 
 ## Version-Line Differences
 
@@ -110,7 +110,7 @@ This document describes the KiCad file-format differences that are actually hand
 | KiCad 8 | `.kicad_pro` JSON | `20231120` | `20231120` | `20240108` | `20231118` | Boundaries include `generator_version`, PCB footprint fields, and UUID/id normalization. |
 | KiCad 9 | `.kicad_pro` JSON | `20250114` | `20241209` | `20241229` | `20231118` | Boundaries include embedded files/fonts, tables, rule areas, component classes, pad/via stacks, and font face fields. |
 | KiCad 10 | `.kicad_pro` JSON | `20260306` | `20251024` | `20260206` | `20231118` | Boundaries include variants, jumper/power/position flags, body styles, groups/locked fields, via protection, backdrill, barcodes, net chains, and native ellipses. |
-| KiCad 10.99 | `.kicad_pro` JSON | `20260306` | `20251024` | `20260603` | `20231118` | Only board/footprint advance to `20260603`; development-only additions such as table-cell `knockout` are handled by implemented rules only. |
+| KiCad 10.99 | `.kicad_pro` JSON | `20260722` | `20260629` | `20260728` | `20231118` | Adds native ellipses, pin maps/overrides, variant symbol overrides, footprint affine transforms, corrected PNG PPI scaling, geometric constraints, and custom grid items; older targets approximate or remove them with warnings. |
 
 ## Conversion Dispatch
 

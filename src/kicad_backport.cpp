@@ -53,6 +53,8 @@ struct EMBEDDED_MODEL_EXPORT_RESULT
     std::vector<std::string> Warnings;
 };
 
+DOCUMENT loadDocumentImpl( const FS::path& aPath, long long* aReadUs, long long* aParseUs );
+
 long long elapsedMicros( CLOCK::time_point aStart, CLOCK::time_point aEnd )
 {
     return std::chrono::duration_cast<std::chrono::microseconds>( aEnd - aStart ).count();
@@ -840,7 +842,8 @@ int ensureLegacySchematicLibraryLine( const FS::path& aSchematic, const std::str
 
 
 FILE_REPORT ensureLegacySchematicCacheLibrary( const FS::path& aProjectDir,
-                                               const std::vector<PROJECT_COPY_ENTRY>& aCopied )
+                                               const std::vector<PROJECT_COPY_ENTRY>& aCopied,
+                                               int aTargetMajor )
 {
     FILE_REPORT report;
     report.Path = aProjectDir.string();
@@ -867,6 +870,42 @@ FILE_REPORT ensureLegacySchematicCacheLibrary( const FS::path& aProjectDir,
         return report;
 
     FS::path libraryPath = aProjectDir / "Library.lib";
+
+    if( !FS::exists( libraryPath ) )
+    {
+        for( const PROJECT_COPY_ENTRY& entry : aCopied )
+        {
+            if( entry.Output.parent_path() != aProjectDir
+                || Lower( entry.Output.extension().string() ) != ".sch"
+                || Lower( entry.Source.extension().string() ) != ".kicad_sch" )
+            {
+                continue;
+            }
+
+            try
+            {
+                DOCUMENT source = loadDocumentImpl( entry.Source, nullptr, nullptr );
+                std::vector<std::string> warnings;
+                std::string text = EmbeddedSchematicSymbolsToLegacyLibraryText( source,
+                                                                                aTargetMajor,
+                                                                                &warnings );
+
+                if( text.empty() )
+                    continue;
+
+                WriteTextFile( libraryPath, text );
+                report.Changed = true;
+                report.Warnings.push_back( "created legacy symbol library from schematic symbols" );
+                report.Warnings.insert( report.Warnings.end(), warnings.begin(), warnings.end() );
+                break;
+            }
+            catch( const std::exception& e )
+            {
+                report.Warnings.push_back( std::string( "could not create legacy symbol library: " )
+                                           + e.what() );
+            }
+        }
+    }
 
     if( !FS::exists( libraryPath ) )
         return report;
@@ -1338,6 +1377,12 @@ const SEXPR::NODE* resolvedProjectLocalSymbolSource(
 
     splitSymbolLibId( parentName, parentNickname, parentName );
 
+    if( aSymbolsByLibrary.find( parentNickname ) == aSymbolsByLibrary.end() )
+    {
+        parentNickname = aNickname;
+        parentName = extends->AtomAt( 1 );
+    }
+
     aVisitingLibIds.insert( libId );
     const SEXPR::NODE* parent = resolvedProjectLocalSymbolSource( aSymbolsByLibrary,
                                                                   parentNickname,
@@ -1372,6 +1417,26 @@ void renameNestedSymbolDefinitions( SEXPR::NODE* aNode, const std::string& aOldN
     if( !aNode || aNode->IsAtom() || aOldName.empty() || aNewName.empty() )
         return;
 
+    std::string oldShortName = symbolLibrarySymbolNameFromLibId( aOldName );
+
+    auto renamedNestedName = [&]( const std::string& aName ) -> std::string
+    {
+        if( aName.size() > aOldName.size() && aName.substr( 0, aOldName.size() ) == aOldName
+            && aName[aOldName.size()] == '_' )
+        {
+            return aNewName + aName.substr( aOldName.size() );
+        }
+
+        if( !oldShortName.empty() && aName.size() > oldShortName.size()
+            && aName.substr( 0, oldShortName.size() ) == oldShortName
+            && aName[oldShortName.size()] == '_' )
+        {
+            return aNewName + aName.substr( oldShortName.size() );
+        }
+
+        return aName;
+    };
+
     for( std::unique_ptr<SEXPR::NODE>& child : aNode->Children )
     {
         if( !child || child->IsAtom() )
@@ -1380,23 +1445,18 @@ void renameNestedSymbolDefinitions( SEXPR::NODE* aNode, const std::string& aOldN
         if( child->HeadView() == "symbol" )
         {
             std::string name = child->AtomAt( 1 );
+            std::string renamed = renamedNestedName( name );
 
-            if( name.size() > aOldName.size() && name.substr( 0, aOldName.size() ) == aOldName
-                && name[aOldName.size()] == '_' )
-            {
-                child->SetAtomAt( 1, aNewName + name.substr( aOldName.size() ), true );
-            }
+            if( renamed != name )
+                child->SetAtomAt( 1, renamed, true );
 
             if( SEXPR::NODE* extends = child->ChildList( "extends" ) )
             {
                 std::string parent = extends->AtomAt( 1 );
+                std::string renamedParent = renamedNestedName( parent );
 
-                if( parent.size() > aOldName.size()
-                    && parent.substr( 0, aOldName.size() ) == aOldName
-                    && parent[aOldName.size()] == '_' )
-                {
-                    extends->SetAtomAt( 1, aNewName + parent.substr( aOldName.size() ), true );
-                }
+                if( renamedParent != parent )
+                    extends->SetAtomAt( 1, renamedParent, true );
             }
         }
 
@@ -1614,7 +1674,7 @@ FILE_REPORT ensureProjectLocalSymbolLibraryTable(
 
     std::map<std::string, std::string> libraries =
             collectProjectLocalSymbolLibraries( aProjectDir, aCopied, referencedNicknames,
-                                                aTargetMajor > 5 );
+                                                aTargetMajor > 5 && !referencedNicknames.empty() );
 
     if( libraries.empty() )
         return report;
@@ -2164,6 +2224,211 @@ void rebuildKiCad6ProjectHierarchyInstances( const std::vector<PROJECT_COPY_ENTR
             continue;
 
         rebuildKiCad6HierarchyInstances( entry.Output );
+    }
+}
+
+
+std::string projectNameForDirectory( const FS::path& aProjectDir )
+{
+    std::error_code error;
+
+    for( FS::directory_iterator it( aProjectDir, error ), end; it != end; ++it )
+    {
+        if( it->is_regular_file() && Lower( it->path().extension().string() ) == ".kicad_pro" )
+            return it->path().stem().string();
+    }
+
+    for( FS::directory_iterator it( aProjectDir, error ), end; it != end; ++it )
+    {
+        if( it->is_regular_file() && Lower( it->path().extension().string() ) == ".pro" )
+            return it->path().stem().string();
+    }
+
+    return aProjectDir.stem().string();
+}
+
+
+void setPathChildAtom( SEXPR::NODE* aPath, const std::string& aHead,
+                       const std::string& aValue, bool aQuoted )
+{
+    if( !aPath )
+        return;
+
+    SEXPR::NODE* child = aPath->ChildList( aHead );
+
+    if( child )
+    {
+        child->SetAtomAt( 1, aValue, aQuoted );
+        return;
+    }
+
+    std::unique_ptr<SEXPR::NODE> node = listNode( aHead );
+    node->Children.push_back( SEXPR::NODE::MakeAtom( aValue, aQuoted ) );
+    aPath->Children.push_back( std::move( node ) );
+}
+
+
+void syncPathWithSymbolProperties( SEXPR::NODE* aPath, SEXPR::NODE* aSymbol )
+{
+    std::string unit = childAtomOrEmpty( aSymbol, "unit" );
+
+    if( unit.empty() )
+        unit = "1";
+
+    std::string value = schematicPropertyValue( aSymbol, "Value" );
+    std::string reference = normalizedHiddenInstanceReference(
+            schematicPropertyValue( aSymbol, "Reference" ), value );
+
+    setPathChildAtom( aPath, "reference", reference, true );
+    setPathChildAtom( aPath, "unit", unit, false );
+    setPathChildAtom( aPath, "value", value, true );
+    setPathChildAtom( aPath, "footprint", schematicPropertyValue( aSymbol, "Footprint" ), true );
+}
+
+
+void replaceSymbolInstances( SEXPR::NODE* aSymbol, SEXPR::NODE* aPath,
+                             const std::string& aProjectName )
+{
+    removeDirectChildByHead( aSymbol, "instances" );
+
+    std::unique_ptr<SEXPR::NODE> instances = listNode( "instances" );
+    std::unique_ptr<SEXPR::NODE> project = listNode( "project" );
+    std::unique_ptr<SEXPR::NODE> path = cloneNode( aPath );
+    syncPathWithSymbolProperties( path.get(), aSymbol );
+
+    project->Children.push_back( SEXPR::NODE::MakeAtom( aProjectName, true ) );
+    project->Children.push_back( std::move( path ) );
+    instances->Children.push_back( std::move( project ) );
+    aSymbol->Children.push_back( std::move( instances ) );
+}
+
+
+std::map<std::string, SEXPR::NODE*> rootSymbolInstancePaths( SEXPR::NODE* aRoot )
+{
+    std::map<std::string, SEXPR::NODE*> paths;
+    SEXPR::NODE* symbolInstances = aRoot ? aRoot->ChildList( "symbol_instances" ) : nullptr;
+
+    if( !symbolInstances )
+        return paths;
+
+    for( const std::unique_ptr<SEXPR::NODE>& child : symbolInstances->Children )
+    {
+        if( child && !child->IsAtom() && child->HeadView() == "path"
+            && !child->AtomAtView( 1 ).empty() )
+        {
+            paths[child->AtomAt( 1 )] = child.get();
+        }
+    }
+
+    return paths;
+}
+
+
+int distributeSymbolInstancesInSchematic(
+        const FS::path& aSchematic, const std::string& aPrefix,
+        const std::map<std::string, SEXPR::NODE*>& aInstances,
+        const std::string& aProjectName, std::set<std::string>& aActiveFiles )
+{
+    std::string activeKey = FS::absolute( aSchematic ).lexically_normal().string();
+
+    if( aActiveFiles.count( activeKey ) != 0 )
+        return 0;
+
+    aActiveFiles.insert( activeKey );
+
+    std::string text = ReadTextFile( aSchematic );
+    std::unique_ptr<SEXPR::NODE> root = SEXPR::Parse( text );
+
+    if( !root || root->HeadView() != "kicad_sch" )
+    {
+        aActiveFiles.erase( activeKey );
+        return 0;
+    }
+
+    int changed = 0;
+
+    for( const std::unique_ptr<SEXPR::NODE>& child : root->Children )
+    {
+        if( !child || child->IsAtom() || child->HeadView() != "symbol"
+            || !child->ChildList( "lib_id" ) )
+        {
+            continue;
+        }
+
+        std::string uuid = childAtomOrEmpty( child.get(), "uuid" );
+
+        if( uuid.empty() )
+            continue;
+
+        std::string path = appendInstanceUuid( aPrefix, uuid );
+        auto found = aInstances.find( path );
+
+        if( found == aInstances.end() )
+            continue;
+
+        replaceSymbolInstances( child.get(), found->second, aProjectName );
+        ++changed;
+    }
+
+    bool isRootFile = aPrefix.empty() || aPrefix == "/";
+
+    if( isRootFile && root->ChildList( "symbol_instances" ) )
+    {
+        removeDirectChildByHead( root.get(), "symbol_instances" );
+        ++changed;
+    }
+
+    for( const std::unique_ptr<SEXPR::NODE>& child : root->Children )
+    {
+        if( !child || child->IsAtom() || child->HeadView() != "sheet" )
+            continue;
+
+        std::string uuid = childAtomOrEmpty( child.get(), "uuid" );
+        std::string sheetFile = sheetFilePropertyValue( child.get() );
+
+        if( uuid.empty() || sheetFile.empty() )
+            continue;
+
+        FS::path childPath = aSchematic.parent_path() / sheetFile;
+
+        if( !FS::exists( childPath ) )
+            continue;
+
+        changed += distributeSymbolInstancesInSchematic( childPath,
+                appendInstanceUuid( aPrefix, uuid ), aInstances, aProjectName, aActiveFiles );
+    }
+
+    if( changed > 0 )
+        WriteTextFile( aSchematic, SEXPR::Format( root.get(), text.size() ) );
+
+    aActiveFiles.erase( activeKey );
+    return changed;
+}
+
+
+void distributeProjectSymbolInstances( const FS::path& aProjectDir,
+                                       const std::vector<PROJECT_COPY_ENTRY>& aEntries )
+{
+    std::string projectName = projectNameForDirectory( aProjectDir );
+
+    for( const PROJECT_COPY_ENTRY& entry : aEntries )
+    {
+        if( Lower( entry.Output.extension().string() ) != ".kicad_sch"
+            || entry.Output.parent_path() != aProjectDir )
+        {
+            continue;
+        }
+
+        std::string text = ReadTextFile( entry.Output );
+        std::unique_ptr<SEXPR::NODE> root = SEXPR::Parse( text );
+        std::map<std::string, SEXPR::NODE*> instances = rootSymbolInstancePaths( root.get() );
+
+        if( instances.empty() )
+            continue;
+
+        std::set<std::string> activeFiles;
+        distributeSymbolInstancesInSchematic( entry.Output, "", instances, projectName,
+                                              activeFiles );
     }
 }
 
@@ -3239,9 +3504,14 @@ int CONVERTER::runConvert( const std::vector<std::string>& aArgs )
             }
         }
 
-        if( targetMajor > 5 )
+        if( targetMajor == 6 )
         {
             rebuildKiCad6ProjectHierarchyInstances( copied );
+        }
+
+        if( targetMajor == 8 || targetMajor == 9 )
+        {
+            distributeProjectSymbolInstances( output, copied );
         }
 
         if( targetMajor > 5 )
@@ -3306,7 +3576,8 @@ int CONVERTER::runConvert( const std::vector<std::string>& aArgs )
 
             for( const FS::path& projectDir : projectDirs )
             {
-                FILE_REPORT cacheReport = ensureLegacySchematicCacheLibrary( projectDir, copied );
+                FILE_REPORT cacheReport = ensureLegacySchematicCacheLibrary( projectDir, copied,
+                                                                              targetMajor );
 
                 if( cacheReport.Changed || !cacheReport.Warnings.empty() )
                     reports.push_back( cacheReport );

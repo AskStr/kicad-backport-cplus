@@ -47,6 +47,18 @@ struct BOARD_FAST_OPTIONS
     bool DowngradePCBFootprintFields = false;
 };
 
+struct IMAGE_SCALE_MIGRATION_RESULT
+{
+    int Changed = 0;
+    int Unavailable = 0;
+};
+
+struct FOOTPRINT_TRANSFORM_RESULT
+{
+    int Baked = 0;
+    int NonUniform = 0;
+};
+
 struct BOARD_FAST_COUNTS
 {
     std::vector<int> ChildRemovalRules;
@@ -121,6 +133,11 @@ int ensureZoneFilledPolygonLayers( SEXPR::NODE* aRoot );
 int downgradeDimensionsToText( SEXPR::NODE* aRoot );
 int downgradeDimensionsToGraphics( SEXPR::NODE* aRoot );
 int downgradeBoardNetNamesToCodes( SEXPR::NODE* aRoot );
+int downgradeNativeEllipses( SEXPR::NODE* aRoot, bool aPcbGeometry );
+IMAGE_SCALE_MIGRATION_RESULT migrateReferenceImageScales( SEXPR::NODE* aRoot,
+                                                           bool aSchematic,
+                                                           int aSource, int aTarget );
+FOOTPRINT_TRANSFORM_RESULT bakeFootprintTransforms( SEXPR::NODE* aRoot );
 
 std::vector<std::string> removeIntroduced( SEXPR::NODE* aRoot, int aTarget,
                                            const std::vector<FEATURE_RULE>& aRules );

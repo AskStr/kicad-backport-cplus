@@ -21,6 +21,9 @@ std::string ConvertLegacyToSexprText( const DOCUMENT& aDocument, const std::stri
                                       KIND* aTargetKind, std::vector<std::string>* aWarnings );
 std::string ConvertSexprToLegacyText( const DOCUMENT& aDocument, int aTargetMajor,
                                       KIND* aTargetKind, std::vector<std::string>* aWarnings );
+std::string EmbeddedSchematicSymbolsToLegacyLibraryText( const DOCUMENT& aDocument,
+                                                         int aTargetMajor,
+                                                         std::vector<std::string>* aWarnings );
 std::string RewriteLegacyTextForTarget( const DOCUMENT& aDocument, int aTargetMajor,
                                         std::vector<std::string>* aWarnings );
 std::string LegacyDocumentationSidecarText( const DOCUMENT& aDocument, int aTargetMajor,

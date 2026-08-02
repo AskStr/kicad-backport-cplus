@@ -35,7 +35,7 @@ Examples:
 
 | Target | Current behavior |
 | --- | --- |
-| KiCad 10.99 | Development alias. Board and footprint targets write `20260603`; schematic and symbol-library targets remain at the KiCad 10 anchors. |
+| KiCad 10.99 | Latest development profile: symbol libraries write `20260629`, schematics `20260722`, and boards/footprints `20260728`. |
 | KiCad 10 | Removes or rewrites newer development syntax that is not part of the `10.0` target anchors. |
 | KiCad 9 | Removes or downgrades KiCad 10-era features such as variants, barcodes, backdrill/post-machining fields, jumper pad metadata, and net-name-only board references. |
 | KiCad 8 | Removes or rewrites KiCad 9+ tables, embedded files/fonts, component classes, padstacks, via stacks, rule/placement areas, arbitrary user-layer type qualifiers, and font face fields. |
@@ -43,6 +43,8 @@ Examples:
 | KiCad 6 | Targets the first modern schematic/symbol/project file family and adds KiCad 6 parser compatibility structures where required. |
 | KiCad 5.0/5.1 | Uses board/footprint version `20171130` and writes legacy `.sch`, `.lib/.dcm`, and `.pro` for schematic, symbol-library, and project targets. |
 | KiCad 4 | Uses board/footprint version `4`, rewrites V4 legacy schematic/library headers, and simplifies KiCad 5+ PCB constructs where possible. |
+
+The 10.99 downgrade path approximates native ellipses, bakes footprint affine transforms, preserves embedded PNG display size across the corrected-PPI boundary, and reports removals of pin maps, variant overrides, net chains, geometric constraints, and custom grid items.
 
 The per-file version anchors and conversion details are documented in [KiCad backport converter format differences](docs/kicad-backport-converter-format-differences.md).
 
